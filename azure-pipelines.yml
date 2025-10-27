@@ -1,0 +1,110 @@
+# Azure DevOps Pipeline for Deploying DBT Project as Native Object to Snowflake
+# This pipeline packages the dbt project, uploads it to a Snowflake stage, and registers/updates the DBT Project object.
+# It does NOT run dbt models.
+
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: snowflake-dev-variables-holtcat.east-us-2
+  - name: DBT_PROJECT_NAME
+    value: 'dbt_analytics_cloudlink'
+
+stages:
+  - stage: DeployDBTProject
+    jobs:
+      - job: PackageAndDeploy
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+
+          - task: DownloadSecureFile@1
+            name: SF_USERNAME_RSA_PRIVATE_KEY
+            displayName: 'Download SF_USERNAME_RSA_PRIVATE_KEY secure file'
+            inputs:
+              secureFile: 'APP_DEVOPS_CI_CD_USER_DEVQAUAT_rsa_key.p8'
+
+          - task: DownloadSecureFile@1
+            name: SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY
+            displayName: 'Download SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY secure file'
+            inputs:
+              secureFile: 'APP_DATA_TRANSFORM_USER_DEVQAUAT_rsa_key.p8'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install snowflake-cli==3.9.0 dbt-snowflake==1.10.*
+              dbt deps
+              snow --version 
+            displayName: 'Install Snowflake CLI and dbt dependencies'
+
+          - script: |
+              echo "DBT_SNOWFLAKE_ACCOUNT=$DBT_SNOWFLAKE_ACCOUNT"
+              echo "DBT_SNOWFLAKE_USER=$DBT_SNOWFLAKE_USER"
+              zip -r $(DBT_PROJECT_NAME).zip . -x '*.git*' '*.venv*' '*.tox*' '*.pytest_cache*' 'target/*' 'logs/*'
+            env:
+              DBT_HOLTCAT_ANALYTICS_DB_NAME: $(DBT_HOLTCAT_ANALYTICS_DB_NAME)
+              DBT_CLOUDLINK_RAW_DB_NAME: $(DBT_CLOUDLINK_RAW_DB_NAME)
+              DBT_DBS_RAW_DB_NAME: $(DBT_DBS_RAW_DB_NAME)
+              DBT_SNOWFLAKE_ACCOUNT: $(SF_ACCOUNT)
+              DBT_SNOWFLAKE_USER: $(APP_DATA_TRANSFORM_USER)
+              DBT_SNOWFLAKE_ROLE: $(APP_DATA_TRANSFORM_USER_ROLE)
+              DBT_SNOWFLAKE_PRIVATE_KEY_PATH: $(SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY.secureFilePath)
+              DBT_SNOWFLAKE_DATABASE: $(SF_ANALYTICS_CLOUDLINK_DATABASE)
+              DBT_SNOWFLAKE_WAREHOUSE: $(APP_DATA_TRANSFORM_USER_WAREHOUSE)
+              DBT_SNOWFLAKE_SCHEMA: $(SF_ANALYTICS_CLOUDLINK_DBT_SCHEMA)
+              DBT_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: $(SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY_PASSPHRASE)          
+            displayName: 'Package dbt project as zip'
+
+          - script: |
+              set -e
+              openssl version
+              head -5 "$(SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY.secureFilePath)"
+              openssl pkcs8 -inform PEM -in "$(SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY.secureFilePath)" \
+                -out decrypted_rsa_key.p8 -outform PEM -passin pass:"$(SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY_PASSPHRASE)"
+            displayName: 'Decrypt SF_DBT_TRANSFORM_USERNAME_RSA_PRIVATE_KEY (PKCS#8)'
+
+          - script: |
+              echo "DBT_SNOWFLAKE_ACCOUNT=$DBT_SNOWFLAKE_ACCOUNT"
+              echo "DBT_SNOWFLAKE_USER=$DBT_SNOWFLAKE_USER"
+              export SNOWFLAKE_CLI_FEATURES_ENABLE_DBT=true
+              export DBT_SNOWFLAKE_ACCOUNT="holtgrp-prod"
+              snow dbt deploy $(DBT_PROJECT_NAME)\
+                --source . \
+                --profiles-dir . \
+                --database "$(SF_ANALYTICS_CLOUDLINK_DATABASE)" \
+                --schema "$(SF_ANALYTICS_CLOUDLINK_DBT_PROJECT_SCHEMA)" \
+                --role "$(APP_DATA_TRANSFORM_USER_ROLE)" \
+                --warehouse "$(APP_DATA_TRANSFORM_USER_WAREHOUSE)" \
+                --account "$(SF_ACCOUNT)" \
+                --user "$(APP_DATA_TRANSFORM_USER)" \
+                --authenticator SNOWFLAKE_JWT \
+                --private-key-path "decrypted_rsa_key.p8" \
+                -x
+            displayName: 'Deploy dbt project object'
+          - script: |
+
+              snow sql -q "GRANT USAGE ON DBT PROJECT $(DBT_PROJECT_NAME) TO ROLE AZ_GRP_SF_DEVELOPER_ROLE;" \
+                --database "$(SF_ANALYTICS_CLOUDLINK_DATABASE)" \
+                --schema "$(SF_ANALYTICS_CLOUDLINK_DBT_PROJECT_SCHEMA)" \
+                --role "$(APP_DATA_TRANSFORM_USER_ROLE)" \
+                --warehouse "$(APP_DATA_TRANSFORM_USER_WAREHOUSE)" \
+                --account "$(SF_ACCOUNT)" \
+                --user "$(APP_DATA_TRANSFORM_USER)" \
+                --authenticator SNOWFLAKE_JWT \
+                --private-key-path "decrypted_rsa_key.p8" \
+                -x
+            displayName: 'Granting access to dbt project using snow sql (key pair auth)'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(DBT_PROJECT_NAME).zip'
+              ArtifactName: 'dbt_project_zip'
+              publishLocation: 'Container'
+            displayName: 'Publish dbt project zip as artifact'
+
