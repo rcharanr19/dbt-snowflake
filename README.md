@@ -90,7 +90,7 @@ Creating a dbt workspace in Snowflake, especially utilizing the native dbt Proje
      ```
      CREATE OR REPLACE API INTEGRATION cloudlink_dbt_ado_api_integration
      API_PROVIDER = git_https_api
-     API_ALLOWED_PREFIXES = ('https://TexasFirstRentals@dev.azure.com/TexasFirstRentals/Data%20Platform')
+     API_ALLOWED_PREFIXES = ('https://dev.azure.com/')
      -- Comment out the following line if your forked repository is public
      ALLOWED_AUTHENTICATION_SECRETS = (my_api_key_secret)
      ENABLED = TRUE;
